@@ -1,0 +1,1531 @@
+---
+title: '240001384'
+author: '240001384'
+date: "2026-08-10"
+output:
+  word_document: default
+  html_document: default
+---
+
+#Setting up my system
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+base_dir="C:/Shreya/NARW Thesis/Data/"
+```
+
+#Libraries needed to run codes in this project
+```{r}
+library(tidyverse)
+library(readxl)
+library(RColorBrewer)
+#install.packages("scico")
+library(scico)
+library(colorspace)
+#install.packages("MetBrewer")
+library(MetBrewer)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+library(forcats)
+#install.packages("hrbrthemes")
+library(hrbrthemes)
+#install.packages("viridis")
+library(viridis)
+#install.packages("PerformanceAnalytics")
+library(PerformanceAnalytics)
+#install.packages("metR")
+library(metR)
+#install.packages("rioja")
+library(rioja)
+#install.packages("oce")
+library(oce)
+#install.packages("pracma")
+library(pracma)
+library(tibble)
+
+#GAMs
+library(mgcv)
+library(fields)
+library(maps)
+library(mapdata)
+library(akima)
+#install.packages("mirai")
+#install.packages("gratia")
+#library(gratia)
+
+#install.packages(c("sf", "ggspatial", "rosm", "prettymapr"))
+library(sf)
+library(ggspatial)
+library(tidyverse)
+#install.packages("ggnewscale")
+library(ggnewscale)
+
+library(rnaturalearth)
+library(sf)
+library(ggplot2)
+library(cowplot)
+library(patchwork)
+#install.packages("ncdf4")
+library(ncdf4)
+
+
+```
+
+#DATA PROCESSING
+
+#reading in raw data
+```{r}
+Verticals=read.csv(paste0(base_dir,"Verticals.csv"),,sep=",",header=T)
+CTD1999=read.csv(paste0(base_dir,"Original data/CTD/CTD1999.csv"),sep=",",header=T)
+CTD2000=read.csv(paste0(base_dir,"Original data/CTD/CTD2000.csv"),sep=",",header=T)
+CTD2001to2017og=read.csv(paste0(base_dir,"Original data/CTD/CTD2001-2017.csv"),sep=",",header=T)
+CTD2018to2021=read.csv(paste0(base_dir,"Original data/CTD/CTD2018-2021.csv"),sep=",",header=T)
+CTD2022to2023=read.csv(paste0(base_dir,"Original data/CTD/CTD2022-2023.csv"),sep=",",header=T)
+CTD2024=read.csv(paste0(base_dir,"Original data/CTD/CTD2024.csv"),sep=",",header=T)
+CTD2025=read.csv(paste0(base_dir,"Original data/CTD/CTD2025.csv"),sep=",",header=T)
+
+#making one CTD df
+CTD2001to2017=CTD2001to2017og[,-17]
+#CTD2025 <- CTD2025[, c(1,3,11, 2, 5, 8, 4, 6, 7, 10, 9, 14, 13, 15, 12)]
+
+CTD=rbind(CTD1999, CTD2000, CTD2001to2017, CTD2018to2021, CTD2022to2023, CTD2024, CTD2025)
+
+CTD$depth=round(CTD$D.Depth..m.) #rounding depth 
+Verticals$depth=round(Verticals$sample.depth..m.)  #rounding depth
+```
+
+#CTD data as clean date
+```{r}
+CTD <- CTD %>%
+  mutate(
+    date_clean = mdy(CTD$Date),
+    Year = year(date_clean),
+    Month = month(date_clean),
+    Day = day(date_clean)
+  )
+```
+
+#Creating unique ID's
+```{r}
+CTD$ID=paste0(CTD$Year, CTD$Month, CTD$Day, CTD$station)
+Verticals$ID=paste0(Verticals$Year, Verticals$Month, Verticals$Day, Verticals$station)
+```
+
+#subsetting just the column of IDs
+```{r}
+CTDID=subset(CTD, select= c(ID))
+VerticalsID=subset(Verticals, select= c(ID))
+```
+
+#Finding common IDs
+```{r}
+missing_in_verticals <- data.frame(setdiff(CTDID, VerticalsID))
+
+#merging common ID's
+common_IDs <- intersect(CTDID, VerticalsID)
+
+#Merging on shared ID
+merged <- merge(CTDID, VerticalsID, by = "ID")
+merged=unique(merged)
+
+#Filtering rows where column pairs differ
+mismatched <- merged[merged$pair.x != merged$pair.y, ]
+```
+
+#merged vals of verticals and CTD 
+```{r}
+verticalsmergedvals=Verticals%>% filter((ID%in% merged$ID))
+CTDmergedvals=CTD%>% filter(ID%in% merged$ID)
+```
+
+#Interpolating CTD data (With AI help)
+```{r}
+library(tidyverse)
+
+#Identify numeric columns
+numeric_cols <- CTDmergedvals |>
+  select(where(is.numeric)) |>
+  select(-depth) |>
+  names()
+
+#interpolation function
+interp_group <- function(df) {
+  nd <- seq(floor(min(df$depth)), ceiling(max(df$depth)), by = 1)
+  out <- tibble(depth = nd)
+  
+  for (col in numeric_cols) {
+    v <- df[[col]]
+    m <- !is.na(v)
+    if (sum(m) < 2) { out[[col]] <- NA_real_; next }
+    out[[col]] <- approx(x = df$depth[m], y = v[m], xout = nd, rule = 1)$y
+  }
+   out$ID <- unique(df$ID)
+   out$station    <- unique(df$station)
+   out$cruise.name  <- unique(df$cruise.name)
+   out$date_clean <- unique(df$date_clean)
+  return(out)
+}
+
+CTD_Interp <- CTDmergedvals |>
+  group_by(ID) |>
+  group_split() |>
+  lapply(interp_group) |>
+  bind_rows()
+```
+
+#LEFT JOIN - all rows in verticals kept no matter what
+```{r}
+Ctd_Verticals_leftjoin <- verticalsmergedvals %>%
+  left_join(CTD_Interp, by = c("ID", "depth"))
+
+CV_Orderedleftjoin <- Ctd_Verticals_leftjoin %>% arrange(ID, depth)
+
+CV_Orderedleftjoin <- CV_Orderedleftjoin %>%
+  mutate(
+    date_combined = coalesce(dmy(Date), ymd(date_clean)),  # merge, preferring col1
+    doy = yday(date_combined)
+  )
+```
+
+#Converting left join to CSV
+```{r}
+write.csv(CV_Orderedleftjoin, "C:/Shreya/NARW Thesis/Data/CV_LeftJoin.csv")
+```
+
+
+#DATA ANALYSIS
+
+#Reading and improving in data
+```{r}
+Ctd_Verticals_LJ=read.csv(paste0(base_dir,"CV_LeftJoin.csv"),sep=",", header=T) #reading in df with copepod verticals information
+
+nc <- nc_open("C:/Shreya/NARW Thesis/Data/ccb_bath.nc") #opening up the nc file
+print(nc)   #printing variables, dimensions, units, and attributes
+
+lon       <- ncvar_get(nc, "lon")         #reading in longitude data 
+lat       <- ncvar_get(nc, "lat")         #reading in latitude data 
+elevation <- ncvar_get(nc, "elevation")   #reading in elevation data
+
+nc_close(nc) #closing the nc file
+
+nc_df <- expand.grid(lon = lon, lat = lat) |> #creating df of nc file 
+  mutate(
+    elevation = as.vector(elevation),   #negative values are below sea level
+    depth_m   = -elevation              #flipping sign for positive readings of depth
+  )
+
+df_ocean <- nc_df |>         #making a new df with the nc file
+  filter(elevation < 0) |>   #filtering out positive elevation to only get sea depth information 
+  mutate(depth_m = -elevation)   #positive meters below sea level to have positive depth values 
+
+RW_Sightings=read.csv(paste0(base_dir,"RW_Sightings.csv"),sep = ",",header=T) #reading in NARW sightings csv
+
+
+#Making time an integer
+Lightsed=strptime(Ctd_Verticals_LJ$Time, format = "%H:%M:%S") #making time a workable object 
+Ctd_Verticals_LJ$time_of_day=Lightsed$hour*3600 + Lightsed$min*60 + Lightsed$sec #converting time to seconds of the day 
+
+Ctd_Verticals_LJ$Month=as.factor(Ctd_Verticals_LJ$Month.x) #Making month a factor
+
+Ctd_Verticals_LJ = Ctd_Verticals_LJ %>% #creating a column of max depth for each station
+  group_by(ID) %>%
+  mutate(max_depth = max(sample.depth..m., na.rm = TRUE)) %>%
+  ungroup()
+```
+
+#CLEANING DATA
+```{r}
+sum(is.na(Ctd_Verticals_LJ$sample.depth..m.))
+sum(is.na(Ctd_Verticals_LJ$calanus.total.m3))
+
+Ctd_Verticals_LJ$Month=Ctd_Verticals_LJ$Month.x
+Ctd_Verticals_LJ$Year=Ctd_Verticals_LJ$Year.x
+Ctd_Verticals_LJ$Temp=Ctd_Verticals_LJ$T090C
+Ctd_Verticals_LJ$Salinity=Ctd_Verticals_LJ$D.Salinity
+Ctd_Verticals_LJ$Light=Ctd_Verticals_LJ$Par
+
+df_vertical <- Ctd_Verticals_LJ |>
+  filter(!is.na(sample.depth..m.),          #Removing rows where depth or Calanus is NA
+         !is.na(calanus.total.m3)) |>
+  arrange(ID, Date, sample.depth..m.) |>    #Sort depth from surface to bottom within each station 
+  group_by(ID, Date, Year, Month) |>        #Work within each station visit
+  mutate(
+    cum_dens   = cumsum(calanus.total.m3),  #calculate the cumulative sum of calanus from surface to depth
+    total_dens = sum(calanus.total.m3),     #calculate total calanus in the whole profile
+    prop_cum     = if_else(total_dens > 0, 
+                         cum_dens / total_dens, #proportion of calanus accumulated to this depth
+                         NA_real_),
+    max_depth = max(sample.depth..m.),
+    perc_depth      = sample.depth..m. / max_depth #fractional depth (how far through the water column we are)
+  ) |>
+  ungroup() |>
+  mutate(prop_cum = case_when(                     #Nudging boundaries from 0 to 0.001 and 1 to 0.999 as beta regression needs strictly 0:1
+    prop_cum <= 0 ~ 0.001,
+    prop_cum >= 1 ~ 0.999,
+    TRUE        ~ prop_cum
+  )) |>
+  filter(!is.na(prop_cum)) #filtering NA's from prop_cum
+
+###############################################################################################
+
+Ctd_Verticals_LJ <- Ctd_Verticals_LJ |> #piping Ctd_Verticals_LJ
+  group_by(ID, Date) |> #grouping by ID and Date
+  mutate(
+    lat  = if (any(sample.depth..m. == 0, na.rm = TRUE)) {
+      latitude[which(sample.depth..m. == 0)[1]]
+    } else {
+      latitude[which.min(sample.depth..m.)]
+    },  #mutating the latitude assigned at 0m depth (or shallowest depth) to be the latitude for that whole station
+    long = if (any(sample.depth..m. == 0, na.rm = TRUE)) {
+      longitude[which(sample.depth..m. == 0)[1]]
+    } else {
+      longitude[which.min(sample.depth..m.)]
+    }  #mutating the longitude assigned at 0m depth (or shallowest depth) to be the longitude for that whole station
+  ) |>
+  ungroup() #ungrouping after grouping
+
+###############################################################################################
+
+Integrated_new <- Ctd_Verticals_LJ |>
+  #Removing rows where depth, temperature and calanus is NA for integration
+  filter(!is.na(sample.depth..m.),
+         !is.na(Temp),
+        !is.na(calanus.total.m3))|> 
+  arrange(ID, Date, sample.depth..m.) |> #Sorting depth from surface to bottom within each station visit
+  group_by(ID, Date, Year, Month, sample.depth..m., lat, long) |> #Averaging duplicate depths
+  summarise(
+    calanus.total.m3 = mean(calanus.total.m3, na.rm = TRUE), #averaging calanus at duplicate depths 
+    total.zpl.m3     = mean(total.zpl.m3,     na.rm = TRUE), #averaging total copepods at duplicate depths
+    Temp            = mean(Temp,             na.rm = TRUE), #averaging temperature at duplicate depths
+    Salinity       = mean(Salinity,        na.rm = TRUE), #averaging salinity at duplicate depths
+    Light              = mean(Light,               na.rm = TRUE), #averaging Light at duplicate depths
+    .groups = "drop"
+  ) |>
+  group_by(ID, Date, Year, Month, lat, long,) |> #trapezoid integration over depth profile within each station
+  summarise(
+    calanus_wc      = trapz(calanus.total.m3), #Calanus trapezoid integration (unit multiplication: ind m-3 × m = ind m-2)
+    total_zoo_wc    = trapz(total.zpl.m3), #Total zooplankton trapezoid integration (unit multiplication: ind m-3 × m = ind m-2)
+    temp_mean       = mean(Temp,      na.rm = TRUE), #Calculating mean temperature through the water column
+    salinity_mean   = mean(Salinity, na.rm = TRUE), #Calculating mean salinity through the water column
+    Light_mean        = mean(Light,        na.rm = TRUE), #Calculating mean Light through the water column
+    max_depth       = max(sample.depth..m.), #assigning max_depth
+    n_depths        = n(), #calculating the number of depth stratified samples collected at each station
+    .groups = "drop" #dropping the grouping
+  ) |>
+  #cleaning up
+  mutate(
+    Month   = as.numeric(Month), #making month numeric
+    Year    = as.numeric(Year), #making year numeric
+    year_c    = Year - mean(Year),   #centering year for model stability
+    Light_mean  = if_else(Light_mean  < 0, 0, Light_mean), #removing unrealistic values of Light (light cannot be negative) 
+    temp_mean = if_else(temp_mean < 0, 0, temp_mean), #removing negative water temperatures and keeping the lowest temp at 0
+    log_calanus = log(calanus_wc + 0.001) #logging integrated calanus and adding a small constant to avoid logging 0  
+  )
+```
+
+#GAM 1 - ENVIRONMENTAL VARIABLES AFFECTING CALANUS
+How do these environmental factors contribute to where calanus sit in the water column?
+```{r}
+df_vertical$Month <- factor(df_vertical$Month, levels = c("1","2","3","4","5")) #convering Month into a factor 
+
+#creating a GAM with proportion of cumulative calanus as the response variable and covariates as described in the lines below
+WC_position_gam <- gam(
+  prop_cum ~ 
+    s(Temp) +                #temperature
+    s(Salinity) +           #salinity
+    s(time_of_day)+              #time of day
+    s(Light)+                   #light intensity
+    s(max_depth) +            #max_depth
+    ti(perc_depth, by=Month) +   #depth position with seasonality accounted for by month as a factor
+                                  #maximum station depth
+    ti(perc_depth, max_depth),    #Interaction between percent depth (perc_depth) and maximum depth (max_depth)
+  family  = betar(link = "logit"), #beta family 
+  method  = "REML",           #restricted maximum likelihood 
+  select = T,                 #adding shrinkage to see if any variables need to be removed
+  data    = df_vertical       #assigning a dataframe 
+) 
+
+summary(WC_position_gam) #summarising the GAM
+plot_position_gam=plot(WC_position_gam) #plotting the GAM
+x1=data.frame(plot_position_gam[[5]]$x)
+y1=data.frame(plot_position_gam[[5]]$fit)
+gam.check(WC_position_gam) #checking the GAM 
+```
+
+png
+```{r}
+png("GAM_environmental_smooths_labels.png",    #starting and naming my png
+    width = 1800,      #setting the width limit
+    height = 1800,     #setting the height limit
+    res = 300)         #setting the resolution to 300
+
+par(mfrow = c(2, 2))   #setting the png to have two columns and two rows
+
+plot(WC_position_gam,                  #calling the gam
+     select = 1,                       #Temperature
+     shade = TRUE,                     #turning on colour shading for confidence intervals
+     residuals = FALSE)                #not returning residuals for a clean plot
+mtext("A", side = 3, line = 1, adj = 0, font = 2, cex = 1.3)    #creating a letter label for the plot
+
+plot(WC_position_gam,                  #calling the gam
+     select = 2,                       #Salinity
+     shade = TRUE,                     #turning on colour shading for confidence intervals
+     residuals = FALSE)                #not returning residuals for a clean plot
+mtext("B", side = 3, line = 1, adj = 0, font = 2, cex = 1.3)    #creating a letter label for the plot
+
+plot(WC_position_gam,                  #calling the gam
+     select = 4,                       #Light
+     shade = TRUE,                     #turning on colour shading for confidence intervals
+     residuals = FALSE)                #not returning residuals for a clean plot
+mtext("C", side = 3, line = 1, adj = 0, font = 2, cex = 1.3)    #creating a letter label for the plot
+
+plot(WC_position_gam,                  #calling the gam
+     select = 5,                       #Max depth
+     shade = TRUE,                     #turning on colour shading for confidence intervals
+     residuals = FALSE)                #not returning residuals for a clean plot
+mtext("D", side = 3, line = 1, adj = 0, font = 2, cex = 1.3)   #creating a letter label for the plot
+
+par(mfrow = c(1, 1))    #assempling the plots back into one figure 
+dev.off()               #closing the image 
+```
+
+plotting actual density and proportion COMBINED
+```{r}
+pred_vertical <- expand.grid(                       #making a new data frame to predict on 
+  perc_depth        = seq(2.5, 42.5, by = 5) / 45,  #midpoints of every bin at every 5m, divided by station depth
+  max_depth = 45,                                   #setting max_depth as a fixed 45m depth
+  Month           = 1:5                             #months going from January to May
+) |>
+  mutate(
+    actual_depth = perc_depth * max_depth,                              #converts back to metres
+    Temp        = mean(df_vertical$Temp,      na.rm = TRUE),            #holding temperature at its mean 
+    Salinity   = mean(df_vertical$Salinity, na.rm = TRUE),              #holding salinity at its mean
+    Light          = mean(df_vertical$Light,        na.rm = TRUE),      #holding Light at its mean
+    time_of_day=mean(df_vertical$time_of_day, na.rm = T)                #holding time of day at its mean
+    #Year       = mean(as.numeric(df_vertical$Year), na.rm = TRUE)
+  )
+
+
+pred_vertical$prop_cum_pred <- predict(WC_position_gam, newdata = pred_vertical, type = "response") #Predicting cumulative proportion at midpoint of each bin 
+
+#Converting cumulative proportion to per-bin proportion 
+pred_vertical <- pred_vertical |>
+  arrange(Month, actual_depth) |>                                #arranging data by month and depth
+  group_by(Month) |>                                             #grouping by month 
+  mutate(
+    prop_cum_mono=cummax(prop_cum_pred),                        #create a cumulative proportion column
+    prop_bin = c(prop_cum_mono[1], diff(prop_cum_mono)) * 100   #finding proportion per bin
+  ) |>
+  ungroup() |>                                                 #ungrouping 
+  mutate(
+    Month_label = factor(Month, labels = c("January","February",
+                                              "March","April","May"))   #labeling months by thier names 
+  )
+
+depth_summary <- Ctd_Verticals_LJ |>                                 #creating a df with depth bin start and end along with calanus concentration 
+  mutate(depth_bin = floor(sample.depth..m. / 5) * 5) |>             #mutating the bins 
+  group_by(Month, depth_bin) |>                                      #grouping by month and depth bin 
+  summarise(calanus_conc = mean(calanus.total.m3, na.rm = TRUE), .groups = "drop") |>  #taking calanus mean within each bin 
+  mutate(depth_bin_end = depth_bin + 5)                              #creating an upper edge for each bin
+
+prop_df <- pred_vertical |>                                     #creating new df called prop_df
+  transmute(Month = as.integer(Month),                          #Keeps only selected columns in the df; selecting month as an integer
+            depth_bin = floor(actual_depth / 5) * 5,            #creating a depth_bin column 
+            prop_bin)                                           #saving prop_bin
+
+dens_df <- depth_summary |>                                    #creating a dens_df df
+  transmute(Month = as.integer(as.character(Month)),           #keeps only selected columns in the df; selecting month as an integer
+            depth_bin,                                         #saves depth_bin
+            calanus_conc)                                      #saves calanus_conc
+
+combined <- full_join(prop_df, dens_df, by = c("Month", "depth_bin")) |>       #creating a combined df of the above two df
+  mutate(Month_label = factor(Month, labels = c("January","February",          #labelling month by their names 
+                                                 "March","April","May")))
+
+
+scale_factor <- max(combined$calanus_conc, na.rm = TRUE) /     
+                max(combined$prop_bin,   na.rm = TRUE)  #calculating a scaling factor to have proportion and actual c. fin abundance on the same graph
+
+combined_long <- combined |>                                    #creating a new df in long format
+  mutate(calanus_scaled = calanus_conc / scale_factor) |>       #creating calanus_sclaed for observed calanus using the sclae_factor
+  pivot_longer(cols = c(prop_bin, calanus_scaled),              #changing to long format with prop_bin and calanus_sclaed in the same column
+               names_to = "metric", values_to = "value") |>
+  mutate(metric = factor(metric,
+                          levels = c("prop_bin", "calanus_scaled"),           #creating two levels for metric 
+                          labels = c("Predicted % prop. of abundance", "Observed C. finmarchicus density")))  #labelling the two levels
+
+
+combined_plot=ggplot(combined_long, aes(x = depth_bin, y = value, fill = metric)) + #creating a ggplot object
+  geom_col(position = position_dodge(width = 4), width = 4, na.rm = TRUE) +  #Creating a bar chart 
+  scale_fill_manual(
+  values = c("Predicted % prop. of abundance"    = "cadetblue3", "Observed C. finmarchicus density" = "blue4"), #setting colours for the two bars
+  labels = c(    #Setting label names for the bars 
+    expression("Predicted % prop. of abundance"),
+    expression("Observed "*italic("C. finmarchicus")*" density (ind "*m^-3*")")
+  ),
+  name = NULL #removes axes labels 
+)+
+  scale_x_continuous(breaks = seq(0, 45, 10), name = "Depth (m)") +   #setting x-axis sequence 
+  scale_y_continuous(
+    name     = expression("Predicted % proportion of abundance"),   #setting y-axis label 
+    sec.axis = sec_axis(~ . * scale_factor,                                                             #creating the second y-axis 
+                         name = expression("Observed"~italic("C. finmarchicus")~"density (ind "*m^-3*")") #labelling the second y-axis
+  )) +
+  facet_wrap(~ Month_label, nrow = 1) +     #faceting by month for the five different months 
+  theme_bw() +  #setting a theme
+  theme(
+    strip.text         = element_text(face = "bold", size = 16),                          #making month labels bold and increasing their size 
+    panel.spacing      = unit(0.3, "cm"),                                                 #setting spacing between the different month panels
+    axis.title.x       = element_text(face = "bold", size = 14),                          #making x-axis title bold and increasing the size
+    axis.text.x        = element_text(face = "bold", size = 11),                          #making x-axis ticks bold and increasing the size
+    axis.title.y.left  = element_text(color = "cadetblue3", face = "bold", size = 16),    #making left y-axis title bold, increasing size and                                                                                              setting colour 
+    axis.text.y.left   = element_text(color = "cadetblue3", face = "bold", size = 11),    #making left y-axis ticks bold, increasing size and                                                                                              setting colour
+    axis.title.y.right = element_text(color = "blue4", face = "bold", size = 16),         #making right y-axis title bold, increasing size and                                                                                             setting colour          
+    axis.text.y.right  = element_text(color = "blue4", face = "bold", size = 11),         #making right y-axis ticks bold, increasing size and                                                                                             setting colour
+    axis.ticks.length  = unit(0.2, "cm"),                                                 #increasing axis tick size
+    axis.ticks         = element_line(linewidth = 0.6),                                   #setting thickness of ticks                   
+    legend.position   = "bottom",                                                         #setting legend position to be at the bottom
+    legend.title       = element_text(size = 16, face = "bold"),                          #making legend bold and increasing text size
+    legend.text        = element_text(size = 14),                                         #making legend text larger
+    legend.key.size    = unit(1, "cm")                                                    #increasing the legend keys (size of colour squares)
+  )
+
+ggsave("Combined_dens_prop.png", combined_plot, width = 9, height = 7, dpi = 300)        #saving the ggplot in high resolution
+```
+
+#Plourde next steps
+```{r}
+station_data <- Integrated_new |>                #Creating a station_data df with only the below columns selected 
+  select(ID, Date, Year, Month, max_depth, temp_mean, salinity_mean, Light_mean, calanus_wc, lat, long) |>
+  distinct()                                     #removing duplicate rows 
+
+station_bins <- station_data |>                  #creating a station_bins df from station_data
+  rowwise() |>                                   #working with each row at a time
+  mutate(actual_depth = list({                   #creating a new column of actual depth
+    end_val <- floor(max_depth / 5) * 5 - 2.5    #finding the mid-value of each bin
+    if (end_val < 2.5) {                         #If station is less than 2.5m midpoint=2.5
+      2.5 
+    } else {
+      seq(2.5, end_val, by = 5)                  #otherwise creates a 5m sequence of bins
+    }
+  })) |>
+  unnest(actual_depth) |>                        #converts the list back to multiple rows
+  ungroup() |>                                   #removing the rowwise grouping
+  mutate(                                        
+    perc_depth      = actual_depth / max_depth,
+    Month    = factor(Month, levels = levels(df_vertical$Month)),
+    Temp      = temp_mean,
+    Salinity = salinity_mean,
+    Light        = Light_mean,
+    time_of_day   = mean(df_vertical$time_of_day, na.rm = TRUE)
+  )                                              #mutating necessary variables to predict 
+
+station_bins$prop_cum_pred <- predict(WC_position_gam, newdata = station_bins, type = "response")    #predicting proportion of calanus
+
+station_bins <- station_bins |>
+  arrange(ID, Date, actual_depth) |>             #arranging station_bins df by ascending order within ID, date and actual_depth
+  group_by(ID, Date) |>                          #grouping by ID and Date 
+  mutate(
+    prop_cum_mono = cummax(prop_cum_pred),                            #taking the cumulative maximum of prop_cum_pred
+    prop_5m        = c(prop_cum_mono[1], diff(prop_cum_mono)) * 100   #% of proportion in each 5m bin
+  ) |>
+  ungroup()                                                           #removing the grouping
+
+station_bins <- station_bins |>
+  mutate(
+    density_m3 = (prop_5m / 5) * calanus_wc      #calculating density of calanus per cubic metre
+  )
+```
+
+```{r}
+energy_per_individual_J=10.73   #assigning the energy per individual calanus has (based on McKinstry et al. 2013 C5_EC value)
+
+station_bins=station_bins%>%
+  mutate(
+    ED_max_KJ_m3=(density_m3*energy_per_individual_J)/1000      #calculating the energy content present in every cubic metre in kJ
+  )
+```
+
+Creating a suitability index. 
+```{r}
+depth_of_EDmax <- station_bins |>                             #finding out which bin level has the highest energy level and putting it in depth_of_EDmax df
+  group_by(ID, Date) |>                                       #grouping to work within each ID and Date
+  slice_max(ED_max_KJ_m3, n = 1, with_ties = FALSE) |>        #getting only the row with the maximum energy 
+  select(ID, Date, lat, long, Year, depth_of_max = actual_depth, ED_max_KJ_m3, Month, max_depth) |>    
+  ungroup()                                                   #ungrouping
+
+
+depth_of_EDmax <- depth_of_EDmax |>                          
+  mutate(
+    suitability = ED_max_KJ_m3 / 3                           #getting a suitability score for NARW foraging areas
+  )
+
+summary(depth_of_EDmax$suitability)    #summarises suitability 
+```
+
+```{r}
+DO_ED_nooutliers <- subset(depth_of_EDmax, !(ID %in% c("2011429B", "2017412A", "2020226C", "2020226E","2018328D","2017414B"))) #removing 6 outliers 
+```
+
+#GAM 2 to show Sophie
+DO NOT TOUCH
+```{r}
+ED_gam <- gam(                 #Starting a spatial model
+  ED_max_KJ_m3 ~               #Setting ED max as the response 
+    s(max_depth) +             #maximum depth
+    Month+                     #month as a factor
+    s(long, lat, by=Month),    #a lat long smooth with month as a factor 
+  family = tw(),               #modelling with a tweedie family distribution 
+  method = "REML",             #Using REML 
+  select = TRUE,               #Applying shrinkage
+  data   = DO_ED_nooutliers    #calling the relevant df 
+)
+
+summary(ED_gam)               #summarising the GAM
+plot(ED_gam)                  #Plotting the GAMs
+gam.check(ED_gam)             #Plotting GAM check plots 
+```
+
+Lat and long of stations
+```{r}
+LatLongStations=DO_ED_nooutliers%>%select(lat, long)          #creating a latlong df 
+write.csv(LatLongStations, "C:/Shreya/NARW Thesis/Data/LatLongStations.csv")   #saving it as a csv 
+```
+
+Final ED maps
+```{r}
+#creating a prediction hull based on my sampling stations so I am only interpolating
+station_hull <- LatLongStations |>                       #working with LatLongStations df 
+  st_as_sf(coords = c("long", "lat"), crs = 4326) |>     #Converts lat and long into sf spatial objects using WGS84
+  st_union() |>                                          #combining stations points into one workable object 
+  st_convex_hull()                                       #drawing a hull around my stations
+
+land <- ne_states(country = "united states of america", returnclass = "sf")     #calls the US states as a spatial sf object 
+land <- st_crop(land, xmin = -70.65, xmax = -70.00, ymin = 41.65, ymax = 42.10)   #specifying the area of land I need for this study
+
+df_ocean_sub <- df_ocean |>                      #creating a new subset of df_ocean
+  filter(
+    lon >= -70.55,
+    lon <= -70.10,
+    lat >= 41.749,
+    lat <= 42.060
+  )                                              #filtering only relevant lat and longs based on stations
+
+model_month_levels <- levels(ED_gam$model$Month)              #getting the month levels 
+depth_range <- range(depth_of_EDmax$max_depth, na.rm = TRUE)  #getting the depth range to only predict within sampled depth
+
+all_pred <- df_ocean_sub |>                               #preparing prediction grid 
+  rename(long = lon) |>                                   #renaming lon as long to match df
+  select(long, lat, depth_m) |>                           #Selecting only relevant columns
+  rename(max_depth = depth_m) |>                          #renaming depth_m to max_depth to match df
+  tidyr::crossing(Month = factor(model_month_levels, levels = model_month_levels))   #creating prediction locations for all 5 months
+
+all_pred$ED_max_KJ_m3 <- predict(ED_gam, newdata = all_pred, type = "response")      #predicting ED_max for every month on the response scale 
+
+all_pred <- all_pred |>                                                              
+  mutate(
+    ED_max_KJ_m3 = ifelse(max_depth < depth_range[1] | max_depth > depth_range[2], NA, ED_max_KJ_m3)
+  )           #masking any predictions outside the depth range 
+
+
+all_pred_sf <- st_as_sf(all_pred, coords = c("long", "lat"), crs = 4326, remove = FALSE)  #Converting prediction locations into spatial sf points 
+all_pred_sf$in_hull  <- lengths(st_intersects(all_pred_sf, station_hull)) > 0     #determining which predictions are inside the hull
+all_pred_sf$on_land  <- lengths(st_intersects(all_pred_sf, land)) > 0       #determing which predictions are on land
+
+all_pred <- all_pred_sf |>
+  st_drop_geometry() |>
+  mutate(ED_max_KJ_m3 = ifelse(!in_hull | on_land, NA, ED_max_KJ_m3))      #dropping any predictions that are on land or outside the convex hull
+
+fill_limits <- range(all_pred$ED_max_KJ_m3, na.rm = TRUE)   #finds the min and max predicted ED for colour scale
+
+
+make_suitability_map <- function(selected_month) {       #creating a function to make ED map per month
+  new_data_suitability_tweedie <- df_ocean_sub |>        #creating prediction for each month
+    rename(long = lon) |>
+    mutate(Month = factor(selected_month, levels = model_month_levels),
+           max_depth = df_ocean_sub$depth_m)
+
+  pred_suitability <- predict(ED_gam, newdata = new_data_suitability_tweedie,   #predicting ED for every month
+                               type = "response", se.fit = TRUE)   #with the response and residuals 
+  new_data_suitability_tweedie$ED_max_KJ_m3 <- pred_suitability$fit    #storing the fit of the prediction as ED_max in my df
+
+#masking within the depth range and making everything out of depth range NA
+  new_data_suitability_tweedie <- new_data_suitability_tweedie |>  
+    mutate(
+      ED_max_KJ_m3 = ifelse(
+        max_depth < depth_range[1] | max_depth > depth_range[2],
+        NA, ED_max_KJ_m3
+      )
+    )
+
+  pred_sf <- st_as_sf(new_data_suitability_tweedie, coords = c("long", "lat"),
+                      crs = 4326, remove = FALSE)                               #converting prediction points into sf spatial object
+  pred_sf$in_hull <- lengths(st_intersects(pred_sf, station_hull)) > 0    #identifying points inside hull
+  pred_sf$on_land <- lengths(st_intersects(pred_sf, land)) > 0            #identifying points on land
+
+  new_data_suitability_tweedie <- pred_sf |> 
+    st_drop_geometry() |>
+    mutate(ED_max_KJ_m3 = ifelse(!in_hull | on_land, NA, ED_max_KJ_m3))   #keeping only points within hull and within depth range
+  
+
+pred_points <- new_data_suitability_tweedie |>
+  st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)   #creating an sf object of predictions
+
+#Whale sightings as sf spatial object points for each month 
+RW_Sightings_month <- RW_Sightings |>
+  mutate(sighting_month = as.numeric(format(as.Date(date, format = "%d-%b-%y"), "%m"))) |>    #extracting month from the date
+  filter(sighting_month == selected_month) |>      #filtering only sightings from the selected month
+  rename(long = Longitude, lat = Latitude) |>      #renaming lat and long to df names
+  filter(!is.na(long), !is.na(lat)) |>             #removing any NA's in long and late
+  mutate(category = "NARW sighting") |>            #adding a column for NARW sightings
+  st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)   #converts whale sightings into spatial sf points
+
+idx <- st_nearest_feature(RW_Sightings_month, pred_points)   #finding the nearest prediction point for every NARW sighting
+
+#removing any sightings outside prediction area
+RW_Sightings_month <- RW_Sightings_month[
+  !is.na(pred_points$ED_max_KJ_m3[idx]),    
+] |>
+  st_drop_geometry()
+  
+  ggplot() +    #starting a ggplot
+    geom_raster(data = new_data_suitability_tweedie,
+                aes(x = long, y = lat, fill = ED_max_KJ_m3),
+                interpolate = TRUE, na.rm = TRUE) +            #creates the ED max map 
+    geom_sf(data = land, fill = "grey70", color = "black", inherit.aes = FALSE) +   #plots land mass onto the map
+    geom_point(data = RW_Sightings_month, 
+               aes(x = long, y = lat, shape = category, color = category),
+               size = 0.4, show.legend = FALSE) +                               #plots NARW sightings of every month
+    coord_sf(xlim = c(-70.65, -70.00), ylim = c(41.65, 42.10), expand = FALSE) +  #forces geographic extent of map
+    scale_x_continuous(breaks = c(-70.6, -70.4, -70.2, -70.0)) +     #setting x-axis sclae 
+    scale_y_continuous(breaks = c(41.7, 41.9, 42.1))+      #setting y-axis scale 
+    scale_fill_viridis_c(option = "turbo", limits = fill_limits, na.value = NA, name = "ED Max") +   #makes a colour scale for ED max
+    scale_color_manual(name = "Legend", values = c("NARW sighting" = "violetred3")) +   #setting colour of NARW sightings manually
+    annotation_scale(location = "bl") +     #scale bar on bottom left 
+    annotation_north_arrow(location = "bl", style = north_arrow_fancy_orienteering(), height = unit(0.9, "cm"), width = unit(0.9, "cm"), pad_x = unit(0.05, "cm"), pad_y = unit(0.7,"cm")) +    #setting north arrow
+    labs(subtitle = month.name[selected_month], x = NULL, y = NULL) +   #creating a month title above each map
+    theme_minimal()+      #creating a theme
+    theme(
+      plot.subtitle = element_text(    #formatting month labels to be bigger and bold and centred 
+      size = 14,
+      face = "bold",
+     hjust = 0.5
+  ))}
+
+#calling the function for each month 
+p_jan <- make_suitability_map(1)  
+p_feb <- make_suitability_map(2)
+p_mar <- make_suitability_map(3)
+p_apr <- make_suitability_map(4)
+p_may <- make_suitability_map(5)
+
+#getting the legend from one map
+legend_ED <- get_legend(
+  p_jan + theme(legend.position = "right")
+)
+
+#turns the legend into a plot
+legend_plot_ED <- cowplot::ggdraw(legend_ED)
+
+#Remove the legend from all maps
+p_jan_noleg <- p_jan + theme(legend.position = "none")
+p_feb_noleg <- p_feb + theme(legend.position = "none")
+p_mar_noleg <- p_mar + theme(legend.position = "none")
+p_apr_noleg <- p_apr + theme(legend.position = "none")
+p_may_noleg <- p_may + theme(legend.position = "none")
+
+#combine all maps with legend plot 
+combined_fig <-
+  (p_jan_noleg + p_feb_noleg + p_mar_noleg) /
+  (p_apr_noleg + p_may_noleg + legend_plot_ED)
+
+combined_fig   #call on the figure to view 
+
+#save the whole plot on an A4 size png 
+ggsave(
+  filename = "combined_fig_ED.png",
+  plot = combined_fig,
+  width = 11.69,
+  height = 8.27,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+```
+
+Final CV maps
+```{r}
+model_month_levels <- levels(ED_gam$model$Month)
+depth_range <- range(depth_of_EDmax$max_depth, na.rm = TRUE)
+
+
+all_pred_cv <- df_ocean_sub |>                     #preparing prediction grid
+  rename(long = lon) |>                            #renaming lon as long
+  select(long, lat, depth_m) |>                    #selecting long, lat and depth
+  rename(max_depth = depth_m) |>                   #renaming depth_m as max_depth
+  tidyr::crossing(                                 #creating prediction locations for all 5 months 
+    Month = factor(model_month_levels,
+                   levels = model_month_levels))
+
+pred_all_cv <- predict(ED_gam, newdata = all_pred_cv, type = "response", se.fit = TRUE) #predict with new cv df
+
+all_pred_cv$ED_max_KJ_m3 <- pred_all_cv$fit      #setting prediction fit to my df
+all_pred_cv$ED_max_KJ_m3_se <- pred_all_cv$se.fit   #saving se in my df
+
+all_pred_cv$cv <- 100 * all_pred_cv$ED_max_KJ_m3_se /abs(all_pred_cv$ED_max_KJ_m3) #calculating coefficient of variation
+
+#mask predictions outside the depth range 
+all_pred_cv <- all_pred_cv |> mutate(cv = ifelse(max_depth < depth_range[1] | max_depth > depth_range[2],
+                                     NA, cv))
+
+
+all_pred_cv_sf <- st_as_sf(all_pred_cv, coords = c("long", "lat"), crs = 4326, remove = FALSE) #making spatial sf points
+
+all_pred_cv_sf$in_hull <-lengths(st_intersects(all_pred_cv_sf, station_hull)) > 0  #identifyinf which points are in the convex hull
+
+all_pred_cv_sf$on_land <- lengths(st_intersects(all_pred_cv_sf, land)) > 0 #identifying which points are on land
+
+all_pred_cv <- all_pred_cv_sf |> st_drop_geometry() |>   #removing points outside hull or on land
+  mutate(
+    cv = ifelse(!in_hull | on_land, NA, cv))
+
+fill_limits_cv <- range(all_pred_cv$cv, na.rm = TRUE) #finding min and max of CV predictions
+
+make_cv_map <- function(selected_month) {    #creating a cv function
+
+  new_data_cv <- df_ocean_sub |>      #creating a new df for each month
+    rename(long = lon) |>             #renaming lon as long
+    mutate( 
+      Month = factor(selected_month,
+                     levels = model_month_levels),    #selecting only selected month
+      max_depth = depth_m    #renaming depth_m as max_depth
+    )
+
+pred_cv <- predict(ED_gam, newdata = new_data_cv, type = "response", se.fit = TRUE) #predicting CV with new df
+
+  new_data_cv$ED_max_KJ_m3 <- pred_cv$fit      #setting model fit into df
+  new_data_cv$ED_max_KJ_m3_se <- pred_cv$se.fit   #setting se into df 
+
+  new_data_cv$cv <- 100 *new_data_cv$ED_max_KJ_m3_se /abs(new_data_cv$ED_max_KJ_m3) #calculating CV for each month
+
+  new_data_cv <- new_data_cv |>    #removing points outside depth range 
+    mutate(
+      cv = ifelse(
+        max_depth < depth_range[1] |
+          max_depth > depth_range[2],
+        NA, cv))
+
+
+  pred_cv_sf <- st_as_sf(new_data_cv, coords = c("long", "lat"), crs = 4326,  remove = FALSE ) #making prediction points as sf spatial objects 
+
+  pred_cv_sf$in_hull <- lengths(st_intersects(pred_cv_sf, station_hull)) > 0  #identifying points inside hull
+
+  pred_cv_sf$on_land <- lengths(st_intersects(pred_cv_sf, land)) > 0  #identifying points on land 
+
+  new_data_cv <- pred_cv_sf |>                 #removing points outside hull and land 
+    st_drop_geometry() |>
+    mutate(
+      cv = ifelse(!in_hull | on_land, NA, cv)
+    )
+
+  pred_points_cv <- new_data_cv |>        #making predictions spatial sf points
+    st_as_sf(
+      coords = c("long", "lat"),
+      crs = 4326,
+      remove = FALSE
+    )
+
+  ggplot() +  #starting a ggplot
+    geom_raster(data = new_data_cv, aes(x = long, y = lat, fill = cv), interpolate = TRUE, na.rm = TRUE) +  #creating base CV map
+    geom_sf(data = land, fill = "grey70", color = "black", inherit.aes = FALSE) +   #plotting land object
+    coord_sf(xlim = c(-70.65, -70.00), ylim = c(41.65, 42.10), expand = FALSE) +   #creating map extent
+    scale_x_continuous(breaks = c(-70.6, -70.4, -70.2, -70.0)) +    #setting x-axis scale 
+    scale_y_continuous(breaks = c(41.7, 41.9, 42.1)) +    #creating y-axis scale 
+    scale_fill_viridis_c(option = "magma", limits = fill_limits_cv, na.value = NA, name = "CV (%)") +  #creating fill scale for CV
+    annotation_scale(location = "bl") +   #setting distance scale bar on bottom left  
+    annotation_north_arrow(location = "bl", style = north_arrow_fancy_orienteering(),  
+      height = unit(0.9, "cm"), width = unit(0.9, "cm"), pad_x = unit(0.05, "cm"), pad_y = unit(0.7, "cm")) +  #making north arrow
+    labs(subtitle = month.name[selected_month], x = NULL, y = NULL) +
+    theme_minimal()+  #setting a theme
+    theme(plot.subtitle = element_text(size = 14, face = "bold", hjust = 0.5)  #making month labels bold, bigger and centred
+)}
+
+#Making CV maps for each month
+cv_jan <- make_cv_map(1)  
+cv_feb <- make_cv_map(2)
+cv_mar <- make_cv_map(3)
+cv_apr <- make_cv_map(4)
+cv_may <- make_cv_map(5)
+
+#Extract legend from one plot
+legend_CV <- cowplot::get_legend(
+  cv_jan + theme(legend.position = "right")
+)
+
+#making legend into a plot
+legend_plot_CV <- cowplot::ggdraw(legend_CV)
+
+# Remove the legend from all maps
+cv_jan_noleg <- cv_jan + theme(legend.position = "none")
+cv_feb_noleg <- cv_feb + theme(legend.position = "none")
+cv_mar_noleg <- cv_mar + theme(legend.position = "none")
+cv_apr_noleg <- cv_apr + theme(legend.position = "none")
+cv_may_noleg <- cv_may + theme(legend.position = "none")
+
+#Combine with a single legend in the sixth cell
+combined_cv_fig <-
+  (cv_jan_noleg + cv_feb_noleg + cv_mar_noleg) /
+  (cv_apr_noleg + cv_may_noleg + legend_plot_CV)
+
+combined_cv_fig #Calling to view the map 
+```
+
+Making one figure for ED and CV
+```{r}
+library(cowplot)
+
+#getting ED maps' legend
+legend_ED <- get_legend(
+  p_jan +
+    theme(
+      legend.position = "top",
+      legend.direction = "horizontal",
+      legend.title = element_text(size = 10),
+      legend.text = element_text(size = 8),
+      legend.key.width = unit(1.2, "cm"),
+      legend.key.height = unit(0.35, "cm")
+    )
+)
+
+#getting CV maps' legend 
+legend_CV <- get_legend(
+  cv_jan +
+    theme(
+      legend.position = "top",
+      legend.direction = "horizontal",
+      legend.title = element_text(size = 10),
+      legend.text = element_text(size = 8),
+      legend.key.width = unit(1.2, "cm"),
+      legend.key.height = unit(0.35, "cm")
+    )
+)
+
+#plotting all ED maps with no legends in one column
+ed_column <- plot_grid(
+  p_jan_noleg,
+  p_feb_noleg,
+  p_mar_noleg,
+  p_apr_noleg,
+  p_may_noleg,
+  ncol = 1,
+  align = "v"
+)
+
+#plotting all CV maps with no legends in one column
+cv_column <- plot_grid(
+  cv_jan_noleg,
+  cv_feb_noleg,
+  cv_mar_noleg,
+  cv_apr_noleg,
+  cv_may_noleg,
+  ncol = 1,
+  align = "v"
+)
+
+#creating left column with ed maps and ed legend on top
+left_column <- plot_grid(
+  ggdraw(legend_ED),
+  ed_column,
+  ncol = 1,
+  rel_heights = c(0.12, 1)
+)
+
+#creating right column with cv maps and cv legend on top
+right_column <- plot_grid(
+  ggdraw(legend_CV),
+  cv_column,
+  ncol = 1,
+  rel_heights = c(0.12, 1)
+)
+
+#making the final figure with both columns 
+final_fig <- plot_grid(
+  left_column,
+  right_column,
+  ncol = 2,
+  rel_widths = c(1, 1)
+)
+
+#calling the final figure to view
+final_fig
+
+#saving the final figure in A4
+ggsave(
+  "ED_CV_A4.png",
+  final_fig,
+  width = 8.27,
+  height = 11.69,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+```
+
+
+
+Suitability maps
+```{r}
+station_hull <- LatLongStations |>
+  st_as_sf(coords = c("long", "lat"), crs = 4326) |>
+  st_union() |>
+  st_convex_hull()
+
+land <- ne_states(country = "united states of america", returnclass = "sf")
+land <- st_crop(land, xmin = -70.65, xmax = -70.00, ymin = 41.65, ymax = 42.10)
+
+df_ocean_sub <- df_ocean |>
+  filter(
+    lon >= -70.55,
+    lon <= -70.10,
+    lat >= 41.749,
+    lat <= 42.060
+  )
+
+model_month_levels <- levels(ED_gam$model$Month)     #getting the month levels 
+depth_range <- range(depth_of_EDmax$max_depth, na.rm = TRUE) #getting depth range
+
+all_pred_suitability <- df_ocean_sub |>   #preparing prediction df 
+  rename(long = lon) |>
+  select(long, lat, depth_m) |>
+  rename(max_depth = depth_m) |>
+  tidyr::crossing(Month = factor(model_month_levels, levels = model_month_levels))  #creating prediction points for all months 
+
+all_pred_suitability$ED_max_KJ_m3 <- predict(ED_gam, newdata = all_pred_suitability, type = "response") #predicting 
+all_pred_suitability$suitability  <- all_pred_suitability$ED_max_KJ_m3 / 3   #setting suitability as ED_max/3
+
+all_pred_suitability <- all_pred_suitability |>     #predicting only within depth range
+  mutate(
+    suitability = ifelse(max_depth < depth_range[1] | max_depth > depth_range[2], NA, suitability)
+  )
+
+all_pred_suitability_sf <- st_as_sf(all_pred_suitability, coords = c("long", "lat"), crs = 4326, remove = FALSE) #making predictions sf points 
+all_pred_suitability_sf$in_hull <- lengths(st_intersects(all_pred_suitability_sf, station_hull)) > 0 #identifying points inside hull
+all_pred_suitability_sf$on_land <- lengths(st_intersects(all_pred_suitability_sf, land)) > 0 #identifying points on land
+
+all_pred_suitability <- all_pred_suitability_sf |>   #dropping predictions outside hull or on land
+  st_drop_geometry() |>
+  mutate(suitability = ifelse(!in_hull | on_land, NA, suitability))
+
+fill_limits <- range(all_pred_suitability$suitability, na.rm = TRUE)   #creating a shared suitability colour scale 
+
+make_suitability_map <- function(selected_month) {   #creating a suitability function
+  new_data_suitability_tweedie_by3 <- df_ocean_sub |>   #creating a df for each month
+    rename(long = lon) |>
+    mutate(Month = factor(selected_month, levels = model_month_levels),
+           max_depth = df_ocean_sub$depth_m)
+
+  pred_suitability <- predict(ED_gam, newdata = new_data_suitability_tweedie_by3,   #predicting for each month
+                               type = "response", se.fit = TRUE)
+  new_data_suitability_tweedie_by3$ED_max_KJ_m3 <- pred_suitability$fit   #setting model fit to df
+  new_data_suitability_tweedie_by3$suitability  <- new_data_suitability_tweedie_by3$ED_max_KJ_m3 / 3   #converting to suitability
+
+#masking to show only within the depth range  
+  new_data_suitability_tweedie_by3 <- new_data_suitability_tweedie_by3 |>
+    mutate(
+      suitability = ifelse(
+        max_depth < depth_range[1] | max_depth > depth_range[2],
+        NA, suitability))
+
+  pred_sf <- st_as_sf(new_data_suitability_tweedie_by3, coords = c("long", "lat"),
+                      crs = 4326, remove = FALSE)    #making predictions sf spatial points
+  pred_sf$in_hull <- lengths(st_intersects(pred_sf, station_hull)) > 0 #identifying points inside hull
+  pred_sf$on_land <- lengths(st_intersects(pred_sf, land)) > 0  #identifying points on land
+
+  new_data_suitability_tweedie_by3 <- pred_sf |>   #getting points only inside hull
+    st_drop_geometry() |>
+    mutate(suitability = ifelse(!in_hull | on_land, NA, suitability))
+
+  pred_points <- new_data_suitability_tweedie_by3 |>      #pred points as sf spatial points 
+    st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
+
+  RW_Sightings_month <- RW_Sightings |>   #getting NARW sightings for every month
+    mutate(sighting_month = as.numeric(format(as.Date(date, format = "%d-%b-%y"), "%m"))) |>
+    filter(sighting_month == selected_month) |>
+    rename(long = Longitude, lat = Latitude) |>
+    filter(!is.na(long), !is.na(lat)) |>
+    mutate(category = "NARW sighting") |>
+    st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
+
+  idx <- st_nearest_feature(RW_Sightings_month, pred_points)  #finding the nearest sf point to NARW sighting
+
+  RW_Sightings_month <- RW_Sightings_month[   #plotting NARW sighting only if its near a non NA sf point 
+    !is.na(pred_points$suitability[idx]),
+  ] |>
+    st_drop_geometry()
+
+  ggplot() +  #starting a ggplot
+    geom_raster(data = new_data_suitability_tweedie_by3,
+                aes(x = long, y = lat, fill = suitability),  
+                interpolate = TRUE, na.rm = TRUE) +     #plotting suitability base map
+    geom_sf(data = land, fill = "grey70", color = "black", inherit.aes = FALSE) +  #plotting land object
+    geom_point(data = RW_Sightings_month,
+               aes(x = long, y = lat, shape = category, color = category),
+               size = 0.4, show.legend = FALSE) +   #plotting NARW sightings 
+    coord_sf(xlim = c(-70.65, -70.00), ylim = c(41.65, 42.10), expand = FALSE) +   #forcing map extent
+    scale_x_continuous(breaks = c(-70.6, -70.4, -70.2, -70.0)) +    #creating x-axis scale
+    scale_y_continuous(breaks = c(41.7, 41.9, 42.1)) +   #creating y-axis scale
+    scale_fill_viridis_c(option = "turbo", limits = fill_limits, na.value = NA, name = "Suitability") +  #colour scale for suitability
+    scale_color_manual(name = "Legend", values = c("NARW sighting" = "violetred3")) +  #NARW sightings points colour
+    annotation_scale(location = "bl") + #making scale bar 
+    annotation_north_arrow(location = "bl", style = north_arrow_fancy_orienteering(),
+                            height = unit(0.9, "cm"), width = unit(0.9, "cm"),
+                            pad_x = unit(0.05, "cm"), pad_y = unit(0.7, "cm")) +  #making north arrow
+    labs(subtitle = month.name[selected_month], x = NULL, y = NULL) +   #making month label names 
+    theme_minimal() +
+    theme(plot.subtitle = element_text(size = 14, face = "bold", hjust = 0.5))  #setting month labels as bold, bigger and cnetred
+}
+
+#making suitability maps for each month
+p_jan_suitability <- make_suitability_map(1)
+p_feb_suitability <- make_suitability_map(2)
+p_mar_suitability <- make_suitability_map(3)
+p_apr_suitability <- make_suitability_map(4)
+p_may_suitability <- make_suitability_map(5)
+
+#getting legend for suitability
+legend_suit <- get_legend(p_jan_suitability + theme(legend.position = "right"))
+#making the legend a plot
+legend_plot_suit <- cowplot::ggdraw(legend_suit)
+
+#removing legends from each map
+p_jan_noleg_suitability <- p_jan_suitability + theme(legend.position = "none")
+p_feb_noleg_suitability <- p_feb_suitability + theme(legend.position = "none")
+p_mar_noleg_suitability <- p_mar_suitability + theme(legend.position = "none")
+p_apr_noleg_suitability <- p_apr_suitability + theme(legend.position = "none")
+p_may_noleg_suitability <- p_may_suitability + theme(legend.position = "none")
+
+#combining all plots and legend 
+combined_fig_suitability <-
+  (p_jan_noleg_suitability + p_feb_noleg_suitability + p_mar_noleg_suitability) /
+  (p_apr_noleg_suitability + p_may_noleg_suitability + legend_plot_suit)
+
+combined_fig_suitability #calling on the suitability map to view
+
+#saving the suitability maps in A4 
+ggsave(
+  filename = "combined_fig_suitability.png",
+  plot = combined_fig_suitability,
+  width = 11.69, height = 8.27, units = "in", dpi = 600, bg = "white"
+)
+```
+
+Suitability CV Maps
+```{r}
+station_hull <- LatLongStations |>
+  st_as_sf(coords = c("long", "lat"), crs = 4326) |>
+  st_union() |>
+  st_convex_hull()
+
+land <- ne_states(country = "united states of america", returnclass = "sf")
+land <- st_crop(land, xmin = -70.65, xmax = -70.00, ymin = 41.65, ymax = 42.10)
+
+df_ocean_sub <- df_ocean |>
+  filter(
+    lon >= -70.55,
+    lon <= -70.10,
+    lat >= 41.749,
+    lat <= 42.060
+  )
+
+model_month_levels <- levels(ED_gam$model$Month)
+depth_range <- range(depth_of_EDmax$max_depth, na.rm = TRUE)
+
+all_pred_cv <- df_ocean_sub |>     #preparing CV prediction df
+  rename(long = lon) |>
+  select(long, lat, depth_m) |>
+  rename(max_depth = depth_m) |>
+  tidyr::crossing(Month = factor(model_month_levels, levels = model_month_levels))  #making prediction points for all months 
+
+pred_all_cv <- predict(ED_gam, newdata = all_pred_cv, type = "response", se.fit = TRUE) #predict 
+
+all_pred_cv$ED_max_KJ_m3    <- pred_all_cv$fit    #assigning prediction fit to df
+all_pred_cv$ED_max_KJ_m3_se <- pred_all_cv$se.fit #assigning se to df
+all_pred_cv$cv <- 100 * all_pred_cv$ED_max_KJ_m3_se / abs(all_pred_cv$ED_max_KJ_m3)  #calculating CV
+
+all_pred_cv <- all_pred_cv |>
+  mutate(cv = ifelse(max_depth < depth_range[1] | max_depth > depth_range[2], NA, cv))  #removing predictions outside deph range
+
+all_pred_cv_sf <- st_as_sf(all_pred_cv, coords = c("long", "lat"), crs = 4326, remove = FALSE)  #creating sf spatial points
+all_pred_cv_sf$in_hull <- lengths(st_intersects(all_pred_cv_sf, station_hull)) > 0  #identifying points in hull
+all_pred_cv_sf$on_land <- lengths(st_intersects(all_pred_cv_sf, land)) > 0   #identifying points on land
+
+all_pred_cv <- all_pred_cv_sf |>   #removing points on land or outside hull
+  st_drop_geometry() |>
+  mutate(cv = ifelse(!in_hull | on_land, NA, cv))
+
+fill_limits_cv <- range(all_pred_cv$cv, na.rm = TRUE)   #finding range of CV for colour scale
+ 
+make_cv_map <- function(selected_month) {  #creating CV function for each month
+  new_data_cv <- df_ocean_sub |>          #creating a df for each month
+    rename(long = lon) |>
+    mutate(Month = factor(selected_month, levels = model_month_levels),
+           max_depth = df_ocean_sub$depth_m)
+
+  pred_cv <- predict(ED_gam, newdata = new_data_cv, type = "response", se.fit = TRUE) #predicting for each month
+  new_data_cv$ED_max_KJ_m3    <- pred_cv$fit    #including model fit in df
+  new_data_cv$ED_max_KJ_m3_se <- pred_cv$se.fit   #including se in df
+  new_data_cv$cv <- 100 * new_data_cv$ED_max_KJ_m3_se / abs(new_data_cv$ED_max_KJ_m3)  #calculating CV for suitability maps
+
+  new_data_cv <- new_data_cv |>     #masking predictions outside depth range
+    mutate(
+      cv = ifelse(max_depth < depth_range[1] | max_depth > depth_range[2], NA, cv)
+    )
+
+  pred_sf <- st_as_sf(new_data_cv, coords = c("long", "lat"), crs = 4326, remove = FALSE)  #creating sf spatial points
+  pred_sf$in_hull <- lengths(st_intersects(pred_sf, station_hull)) > 0   #identifying points insude hull
+  pred_sf$on_land <- lengths(st_intersects(pred_sf, land)) > 0  #identifying points on land
+
+  new_data_cv <- pred_sf |>   #dropping points outside hull or on land
+    st_drop_geometry() |>
+    mutate(cv = ifelse(!in_hull | on_land, NA, cv))
+
+  pred_points <- new_data_cv |>     #making spatial sf points 
+    st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
+
+  ggplot() +   #starting a ggplot
+    geom_raster(data = new_data_cv,
+                aes(x = long, y = lat, fill = cv),
+                interpolate = TRUE, na.rm = TRUE) +    #creating a CV base map
+    geom_sf(data = land, fill = "grey70", color = "black", inherit.aes = FALSE) + #plotting land polygon
+    coord_sf(xlim = c(-70.65, -70.00), ylim = c(41.65, 42.10), expand = FALSE) +  #forcing map extent
+    scale_x_continuous(breaks = c(-70.6, -70.4, -70.2, -70.0)) +   #making x-axis scale
+    scale_y_continuous(breaks = c(41.7, 41.9, 42.1)) + #making y-axis scale
+    scale_fill_viridis_c(option = "magma", limits = fill_limits_cv, na.value = NA, name = "CV (%)") +  #creating colour scale for CV
+    annotation_scale(location = "bl") +   #making scale bar
+    annotation_north_arrow(location = "bl", style = north_arrow_fancy_orienteering(), #making north arrow
+                            height = unit(0.9, "cm"), width = unit(0.9, "cm"),  
+                            pad_x = unit(0.05, "cm"), pad_y = unit(0.7, "cm")) +
+    labs(subtitle = month.name[selected_month], x = NULL, y = NULL) +   #Making month labels
+    theme_minimal() +
+    theme(plot.subtitle = element_text(size = 14, face = "bold", hjust = 0.5))  #making month labels bigger, bold and centred
+}
+
+#making a CV map for each month
+cv_jan <- make_cv_map(1) 
+cv_feb <- make_cv_map(2)
+cv_mar <- make_cv_map(3)
+cv_apr <- make_cv_map(4)
+cv_may <- make_cv_map(5)
+
+#getting legend of CV plot
+legend_CV <- cowplot::get_legend(cv_jan + theme(legend.position = "right"))
+#making legend a plot
+legend_plot_CV <- cowplot::ggdraw(legend_CV)
+
+#removing the legend from each map
+cv_jan_noleg <- cv_jan + theme(legend.position = "none")
+cv_feb_noleg <- cv_feb + theme(legend.position = "none")
+cv_mar_noleg <- cv_mar + theme(legend.position = "none")
+cv_apr_noleg <- cv_apr + theme(legend.position = "none")
+cv_may_noleg <- cv_may + theme(legend.position = "none")
+
+#creating a combined figure with legend
+combined_cv_fig <-
+  (cv_jan_noleg + cv_feb_noleg + cv_mar_noleg) /
+  (cv_apr_noleg + cv_may_noleg + legend_plot_CV)
+
+combined_cv_fig #calling figure to view
+
+#saving figure 
+ggsave(
+  filename = "combined_fig_cv.png",
+  plot = combined_cv_fig,
+  width = 11.69, height = 8.27, units = "in", dpi = 600, bg = "white"
+)
+```
+
+Making one figure for suitability and CV
+```{r}
+library(cowplot)
+
+#Getting suitability maps' legend
+legend_suit <- get_legend(
+  p_jan_suitability +
+    theme(
+      legend.position = "top",
+      legend.direction = "horizontal",
+      legend.title = element_text(size = 10),
+      legend.text = element_text(size = 8),
+      legend.key.width = unit(1.2, "cm"),
+      legend.key.height = unit(0.35, "cm")
+    )
+)
+
+#Getting CV maps' legend
+legend_CV <- get_legend(
+  cv_jan +
+    theme(
+      legend.position = "top",
+      legend.direction = "horizontal",
+      legend.title = element_text(size = 10),
+      legend.text = element_text(size = 8),
+      legend.key.width = unit(1.2, "cm"),
+      legend.key.height = unit(0.35, "cm")
+    )
+)
+
+#Plotting all suitability maps with no legends in one column
+suit_column <- plot_grid(
+  p_jan_noleg_suitability,
+  p_feb_noleg_suitability,
+  p_mar_noleg_suitability,
+  p_apr_noleg_suitability,
+  p_may_noleg_suitability,
+  ncol = 1,
+  align = "v"
+)
+
+#Plotting all CV maps with no legends in one column
+cv_column <- plot_grid(
+  cv_jan_noleg,
+  cv_feb_noleg,
+  cv_mar_noleg,
+  cv_apr_noleg,
+  cv_may_noleg,
+  ncol = 1,
+  align = "v"
+)
+
+#Creating left column with suitability maps and suitability legend on top
+left_column <- plot_grid(
+  ggdraw(legend_suit),
+  suit_column,
+  ncol = 1,
+  rel_heights = c(0.12, 1)
+)
+
+#Creating right column with CV maps and CV legend on top
+right_column <- plot_grid(
+  ggdraw(legend_CV),
+  cv_column,
+  ncol = 1,
+  rel_heights = c(0.12, 1)
+)
+
+#Making the final figure with both columns
+final_fig_suitability <- plot_grid(
+  left_column,
+  right_column,
+  ncol = 2,
+  rel_widths = c(1, 1)
+)
+
+#Calling the final figure to view
+final_fig_suitability
+
+#Saving the final figure in A4
+ggsave(
+  "Suitability_CV_A4.png",
+  final_fig_suitability,
+  width = 8.27,
+  height = 11.69,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+```
+
+
+#Cross-validation - 70% training data and 30% test data repeated 100 times 
+Gam 1
+```{r}
+n_reps <- 100 #setting number of repetitions
+results <- data.frame(rho = numeric(n_reps),    #creating an empty results df 
+                       intercept = numeric(n_reps), 
+                       slope = numeric(n_reps), 
+                       r2 = numeric(n_reps))
+
+for (i in 1:n_reps) {  #starting 100 reps 
+  set.seed(i)   #setting seed based on repetition number to make it reproducible
+  train_idx <- sample(seq_len(nrow(df_vertical)), size = 0.7 * nrow(df_vertical)) #randomly selects 70% of data
+  train_data <- df_vertical[train_idx, ] #extracts the selected data into train_idx
+  test_data  <- df_vertical[-train_idx, ] #extracts the unselected (30%) of data into test data
+  
+  gam_i <- gam(   #fit GAM on training data
+    prop_cum ~ ti(perc_depth, by = Month) + s(max_depth) + ti(perc_depth, max_depth) +
+      s(Temp) + s(Salinity) + s(time_of_day) + s(Light),
+    family = betar(link = "logit"), method = "REML", select = TRUE,
+    data = train_data
+  )
+  
+  pred_test <- predict(gam_i, newdata = test_data, type = "response") #predict GAM on test data 
+  
+  results$rho[i] <- cor(test_data$prop_cum, pred_test, method = "spearman", use = "complete.obs")  #calculate Spearman's correlation
+  
+#fit linear regression between predicted and observed data 
+  lm_fit <- lm(test_data$prop_cum ~ pred_test)   
+  results$intercept[i] <- coef(lm_fit)[1]  #extract intercept
+  results$slope[i]     <- coef(lm_fit)[2]  #extract slope
+  results$r2[i]        <- summary(lm_fit)$r.squared  #extract r^2
+}
+
+WC_Pos_ColMeans=data.frame(colMeans(results, na.rm = TRUE))  #calculate mean of each column and put in a df
+```
+
+Gam 2
+```{r}
+n_reps <- 100 #setting number of repetitions
+ED_results <- data.frame(rho = numeric(n_reps), #creating an empty results df
+                       intercept = numeric(n_reps), 
+                       slope = numeric(n_reps), 
+                       r2 = numeric(n_reps))
+
+for (i in 1:n_reps) {   #starting 100 reps
+  set.seed(i)  #setting seed based on repetition number to make it reproducible
+  train_idx2 <- sample(seq_len(nrow(DO_ED_nooutliers)), size = 0.7 * nrow(DO_ED_nooutliers)) #randomly selects 70% of data
+  train_data2 <- DO_ED_nooutliers[train_idx2, ] #extracts the selected data into train_idx
+  test_data2  <- DO_ED_nooutliers[-train_idx2, ] #extracts the unselected (30%) of data into test data
+  
+  ED_gam2 <- gam(  #fit GAM on training data
+    ED_max_KJ_m3 ~ s(max_depth)+ Month+ s(long,lat, by=Month),
+    family = tw(), method = "REML", select = TRUE,
+    data = train_data2
+  )
+  
+  pred_test2 <- predict(ED_gam2, newdata = test_data2, type = "response") #predict GAM on test data 
+  
+  ED_results$rho[i] <- cor(test_data2$ED_max_KJ_m3, pred_test2, method = "spearman", use = "complete.obs") #calculate Spearman's correlation
+  
+#fit linear regression between predicted and observed data 
+  lm_fit2 <- lm(test_data2$ED_max_KJ_m3 ~ pred_test2)
+  ED_results$intercept[i] <- coef(lm_fit2)[1] #extract intercept
+  ED_results$slope[i]     <- coef(lm_fit2)[2] #extract slope
+  ED_results$r2[i]        <- summary(lm_fit2)$r.squared  #extract r^2
+}
+
+ED_ColMeans=data.frame(colMeans(ED_results, na.rm = TRUE)) #calculate mean of each column and put in a df
+```
+
+
+
+#visualising my data
+#Methods map of CCB area 
+```{r}
+xlim_main <- c(-70.80, -69.70)  #creating x-axis limits
+ylim_main <- c(41.55, 42.25)    #creating y-axis limits 
+
+land <- ne_states(country = "united states of america", returnclass = "sf")  #calling the US as a sf object
+land <- st_crop(land, xmin = xlim_main[1], xmax = xlim_main[2],
+                 ymin = ylim_main[1], ymax = ylim_main[2])   #cropping the land area for CCB 
+
+p_main <- ggplot() +  #starting a ggplot
+  geom_sf(data = land, fill = "ivory2", color = "black", inherit.aes = FALSE) +  #plotting land
+  geom_point(data = Integrated_new,
+             aes(x = long, y = lat),#, color = "Sampled Stations"),
+             color="red", size = 1, alpha = 0.7,) +                    #plotting stations
+  coord_sf(xlim = xlim_main, ylim = ylim_main, expand = FALSE) +      #forcing extent of map
+  scale_x_continuous(breaks = seq(-70.6, -69.8, by = 0.2),
+                     labels = function(x) paste0(x, "\u00B0W")) +       #creating x-axis scale
+  scale_y_continuous(breaks = seq(41.6, 42.2, by = 0.2)) +   #creating y-axis scale
+  annotation_scale(location = "bl", text_face = "bold") + #creating a scale bar
+  annotation_north_arrow(location = "br", style = north_arrow_fancy_orienteering()) +  #creating a north arrow
+  labs(x = "Longitude", y = "Latitude") +  
+  theme_minimal(base_size = 13) +  #setting theme
+  theme(
+    panel.background = element_rect(fill = "lightblue", color = NA),  #background as plain blue
+    panel.grid = element_line(color = "lightblue", linewidth = 0.3),  #panel grid also as plain blue
+    axis.title = element_text(face = "bold")     #axis title as bold
+  )
+
+us_canada <- ne_countries(scale = "medium",
+                           country = c("united states of america", "canada"),
+                           returnclass = "sf")  #calling US and Canada as sf points
+
+bbox_rect <- st_as_sfc(st_bbox(c(xmin = xlim_main[1], xmax = xlim_main[2],
+                                  ymin = ylim_main[1], ymax = ylim_main[2]),
+                                crs = st_crs(4326)))  #setting a black rectangle 
+
+p_inset <- ggplot() + #starting a ggplot
+  geom_sf(data = us_canada, fill = "ivory", color = "grey40", linewidth = 0.2) + #plotting land 
+  geom_sf(data = bbox_rect, fill = NA, color = "black", linewidth = 1) +  #plotting the black rectangle
+  coord_sf(xlim = c(-82, -63), ylim = c(36, 48), expand = FALSE) +  #cropping to north east area
+  theme_void() +  #creating a theme
+  theme(
+    panel.background = element_rect(fill = "lightblue", color = NA),   #background colour as plain blue
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.8),  #giving the panel a border
+    plot.margin = margin(0, 0, 0, 0)   #plotting marging
+  )
+
+final_map <- ggdraw() +  #creating final map
+  draw_plot(p_main) +   #calling main map
+  draw_plot(p_inset, x = 0.628, y = 0.71, width = 0.27, height = 0.27) #adding inset on top
+
+final_map #calling on the final map
+
+ggsave("cape_cod_bay_map.png", final_map, width = 9, height = 7, dpi = 300)
+```
+
+#Appendix plots
+Calanus cumulative biomass distribution (perc_depth w prop_cum)
+```{r}
+months <- factor(unique(df_vertical$Month))  #creating a factor months object with the 5 months (jan-may)
+
+#creating a new_data df to predict the GAM on
+new_data <- expand.grid(
+  perc_depth     = seq(0, 1, by = 0.05),                       #increasing perc_depth from 0 to 1 by 0.05
+  Month    = months,                                         #assigning Month to be the new month factor  
+  max_depth  = 45,                                             #assigning a max_depth value 
+  Temp      = mean(df_vertical$Temp, na.rm = TRUE),            #holding temperature at its mean 
+  Salinity = mean(df_vertical$Salinity, na.rm = TRUE),         #holding salinity at its mean  
+  Light        = mean(df_vertical$Light, na.rm = TRUE),            #holding Light at its mean 
+  time_of_day=mean(df_vertical$time_of_day, na.rm = T)         #holding time of day at its mean
+) 
+
+pred_WC_gam <- predict(WC_position_gam, newdata = new_data, type = "response", se.fit = TRUE) #predicting WC_position_gam 
+
+new_data$fit <- pred_WC_gam$fit                                #assigning predicted fit as a column to new_data
+new_data$se  <- pred_WC_gam$se.fit                             #assigning predicted se.fit as a column to new_data
+
+new_data <- new_data |>                                        #adding fit, lower and upper confidence intervals as columns to new_data
+  mutate(
+    fit = pred_WC_gam$fit,
+    lwr = pred_WC_gam$fit - 1.96 * pred_WC_gam$se.fit,
+    upr = pred_WC_gam$fit + 1.96 * pred_WC_gam$se.fit
+  ) |>
+  arrange(Month, perc_depth)                                 #arranging Month and then perc_depth
+
+ggplot(new_data, aes(x = perc_depth, y = fit,                  #creating a new ggplot to plot predicted GAM
+                     color = factor(Month),                  #making colours based on month factors 
+                     fill  = factor(Month))) +               #filling in the graphs based on month colour factors 
+  geom_ribbon(aes(ymin = lwr, ymax = upr),                     #creating a ribbon around the fit line as confidence intervals 
+              alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 1) +                                 #creating lines
+  facet_wrap(~ Month, 
+             nrow = 2,                                       #all 5 in 2 rows
+             labeller = labeller(Month = c(                #label with month names
+               "1" = "January",
+               "2" = "February", 
+               "3" = "March",
+               "4" = "April",
+               "5" = "May"
+             ))) +
+  scale_color_brewer(palette = "Set1", guide = "none") +  
+  scale_fill_brewer( palette = "Set1", guide = "none") +
+  labs(                                                     #labeling x and y axis and title of plot 
+    x     = "Proportional depth (perc_depth)",
+    y     = expression("Proportion of " * italic("Calanus finmarchicus")),
+    title = expression(italic("Calanus finmarchicus")~"cumulative abundance distribution")
+  ) +
+  theme_classic() +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+#R version and package version information
+```{r}
+R.version.string
+sessionInfo()
+
+citation("rnaturalearth")
+citation("rnaturalearthdata")
+```
